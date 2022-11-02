@@ -1845,7 +1845,7 @@ private:
   /// {
   ///   a + b,
   ///   x + y,
-  ///   c,
+  ///   c
   /// }
   /// ```
   template <typename Container, typename OpenFunc, typename CloseFunc,
