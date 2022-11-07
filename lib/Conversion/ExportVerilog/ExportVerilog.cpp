@@ -3879,8 +3879,8 @@ LogicalResult StmtEmitter::visitSV(CaseOp op) {
             });
           })
           .Case<CaseEnumPattern>([&](auto enumPattern) {
-            ps << emitter.fieldNameResolver.getEnumFieldName(
-                enumPattern->attr().template cast<hw::EnumFieldAttr>());
+            ps << PPExtString(emitter.fieldNameResolver.getEnumFieldName(
+                enumPattern->attr().template cast<hw::EnumFieldAttr>()));
           })
           .Case<CaseDefaultPattern>([&](auto) { ps << "default"; })
           .Default([&](auto) { assert(false && "unhandled case pattern"); });
@@ -4146,7 +4146,7 @@ LogicalResult StmtEmitter::visitSV(AssignInterfaceSignalOp op) {
   // TODO: emit like emitAssignLike does, maybe refactor.
   ps << "assign ";
   emitExpression(op.getIface(), emitted);
-  ps << "." << StringRef(op.getSignalName()) << " = ";
+  ps << "." << PPExtString(op.getSignalName()) << " = ";
   emitExpression(op.getRhs(), emitted);
   ps << ";";
   setPendingNewline();
@@ -4163,7 +4163,7 @@ void StmtEmitter::emitStatement(Operation *op) {
     return;
 
   emitOpError(op, "cannot emit this operation to Verilog");
-  ps << "unknown MLIR operation " << op->getName().getStringRef();
+  ps << "unknown MLIR operation " << PPExtString(op->getName().getStringRef());
   setPendingNewline();
 }
 
@@ -4447,14 +4447,15 @@ void ModuleEmitter::emitStatement(Operation *op) {
 void ModuleEmitter::emitHWExternModule(HWModuleExternOp module) {
   auto verilogName = module.getVerilogModuleNameAttr();
   startStatement();
-  ps << "// external module " << verilogName.getValue() << PP::newline;
+  ps << "// external module " << PPExtString(verilogName.getValue())
+     << PP::newline;
   setPendingNewline();
 }
 
 void ModuleEmitter::emitHWGeneratedModule(HWModuleGeneratedOp module) {
   auto verilogName = module.getVerilogModuleNameAttr();
   startStatement();
-  ps << "// external generated module " << verilogName.getValue()
+  ps << "// external generated module " << PPExtString(verilogName.getValue())
      << PP::newline;
   setPendingNewline();
 }
@@ -4654,7 +4655,7 @@ void ModuleEmitter::emitHWModule(HWModuleOp module) {
     emitError(module, "SV attributes emission is unimplemented for the op");
 
   startStatement();
-  ps << "module " << getVerilogModuleName(module);
+  ps << "module " << PPExtString(getVerilogModuleName(module));
 
   // If we have any parameters, print them on their own line.
   if (!module.getParameters().empty()) {
@@ -4722,8 +4723,8 @@ void ModuleEmitter::emitHWModule(HWModuleOp module) {
               if (scratch.size() < maxTypeWidth)
                 ps.nbsp(maxTypeWidth - scratch.size());
 
-              ps << state.globalNames.getParameterVerilogName(
-                  module, paramAttr.getName());
+              ps << PPExtString(state.globalNames.getParameterVerilogName(
+                  module, paramAttr.getName()));
 
               if (defaultValue) {
                 ps << " = ";
@@ -4810,13 +4811,14 @@ void ModuleEmitter::emitHWModule(HWModuleOp module) {
           (hasZeroWidth ? 3 : 0) + (hasOutputs ? 7 : 6) + maxTypeWidth;
 
       // Emit the name.
-      ps << getPortVerilogName(module, portInfo[portIdx]);
+      ps << PPExtString(getPortVerilogName(module, portInfo[portIdx]));
       ps.invokeWithStringOS(
           [&](auto &os) { printUnpackedTypePostfix(portType, os); });
 
       if (state.options.printDebugInfo && portInfo[portIdx].sym &&
           !portInfo[portIdx].sym.getValue().empty())
-        ps << " /* inner_sym: " << portInfo[portIdx].sym.getValue() << " */";
+        ps << " /* inner_sym: " << PPExtString(portInfo[portIdx].sym.getValue())
+           << " */";
 
       ++portIdx;
 
@@ -4836,15 +4838,15 @@ void ModuleEmitter::emitHWModule(HWModuleOp module) {
           ps << ",";
           ps << PP::newline;
           ps.nbsp(startOfNamePos);
-          ps << name;
+          ps << PPExtString(name);
           ps.invokeWithStringOS([&](auto &os) {
             printUnpackedTypePostfix(portInfo[portIdx].type, os);
           });
 
           if (state.options.printDebugInfo && portInfo[portIdx].sym &&
               !portInfo[portIdx].sym.getValue().empty())
-            ps << " /* inner_sym: " << portInfo[portIdx].sym.getValue()
-               << " */";
+            ps << " /* inner_sym: "
+               << PPExtString(portInfo[portIdx].sym.getValue()) << " */";
 
           ++portIdx;
         }
