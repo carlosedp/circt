@@ -27,6 +27,7 @@
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/APSInt.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Debug.h"
 
@@ -512,6 +513,207 @@ void LowerAnnotationsPass::runOnOperation() {
     auto attr = worklistAttrs.pop_back_val();
     if (applyAnnotation(attr, state).failed())
       ++numFailures;
+  }
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "WiringProblems:\n";
+    for (auto tuple : llvm::enumerate(state.wiringProblems)) {
+      auto problem = tuple.value();
+      llvm::dbgs() << "  - id: " << tuple.index() << "\n";
+      llvm::dbgs() << "    source:\n";
+      llvm::dbgs() << "      module: "
+                   << problem.source.getDefiningOp()
+                          ->getParentOfType<FModuleOp>()
+                          .moduleName()
+                   << "\n";
+      llvm::dbgs() << "      value: " << problem.source << "\n";
+      llvm::dbgs() << "    sink:\n";
+      llvm::dbgs() << "      module: "
+                   << problem.sink.getDefiningOp()
+                          ->getParentOfType<FModuleOp>()
+                          .moduleName()
+                   << "\n";
+      llvm::dbgs() << "      value: " << problem.sink << "\n";
+      llvm::dbgs() << "    isRefType: " << (problem.isRefType ? "yes" : "no")
+                   << "\n";
+    }
+  });
+
+  // For all discovered Wiring Problems, record pending modifications to
+  // modules.
+  DenseMap<FModuleLike, ModuleModifications> moduleModifications;
+  LLVM_DEBUG({ llvm::dbgs() << "Grouping WiringProblem by-module\n"; });
+  for (auto &tuple : llvm::enumerate(state.wiringProblems)) {
+    auto problem = tuple.value();
+    auto index = tuple.index();
+    // Compute LCA between source and sink.
+    auto source = problem.source;
+    auto sink = problem.sink;
+    llvm::dbgs() << "  - index: " << index << "\n";
+
+    // Pre-populate source/sink module modifications connection values.
+    auto sourceModule = source.getDefiningOp()->getParentOfType<FModuleOp>();
+    moduleModifications[sourceModule].connectionMap[index] = source;
+    llvm::dbgs() << "    initial source:\n"
+                 << "      module: " << sourceModule.moduleName() << "\n"
+                 << "      value: " << source << "\n";
+    auto sinkModule = sink.getDefiningOp()->getParentOfType<FModuleOp>();
+    moduleModifications[sinkModule].connectionMap[index] = sink;
+    llvm::dbgs() << "    initial sink:\n"
+                 << "      module: " << sinkModule.moduleName() << "\n"
+                 << "      value: " << sink << "\n";
+
+    auto sourcePaths = instancePathCache.getAbsolutePaths(sourceModule);
+    assert(sourcePaths.size() == 1);
+
+    auto sinkPaths = instancePathCache.getAbsolutePaths(sinkModule);
+    assert(sinkPaths.size() == 1);
+
+    llvm::dbgs() << "    sourcePaths:\n";
+    for (auto inst : sourcePaths[0])
+      llvm::errs() << "      - " << inst.instanceName() << " of "
+                   << inst.referencedModuleName() << "\n";
+
+    llvm::dbgs() << "    sinkPaths:\n";
+    for (auto inst : sinkPaths[0])
+      llvm::errs() << "      - " << inst.instanceName() << " of "
+                   << inst.referencedModuleName() << "\n";
+
+    FModuleOp lca = cast<FModuleOp>(
+        instancePathCache.instanceGraph.getTopLevelNode()->getModule());
+    auto sources = sourcePaths[0];
+    auto sinks = sinkPaths[0];
+    while (!sources.empty() || sinks.empty()) {
+      if (sources[0] != sinks[0])
+        break;
+      auto newLCA = sources[0];
+      lca = cast<FModuleOp>(newLCA.getReferencedModule());
+      sources = sources.drop_front();
+      sinks = sinks.drop_front();
+    }
+
+    llvm::errs() << "    LCA: " << lca.moduleName() << "\n";
+
+    // Record ports to add from LCA to source, LCA to sink, and create the
+    // U-turn wire in the LCA.
+    for (auto &source : sources) {
+      auto foo = source;
+      auto mod = cast<FModuleOp>(foo.getReferencedModule());
+      auto tpe =
+          problem.isRefType
+              ? RefType::get(cast<FIRRTLBaseType>(problem.source.getType()))
+              : problem.source.getType();
+      moduleModifications[mod].portsToAdd.push_back(
+          {{StringAttr::get(mod.getContext(), state.getNamespace(mod).newName(
+                                                  problem.newNameHint)),
+            tpe, Direction::Out},
+           index});
+    }
+
+    for (auto &sink : sinks) {
+      auto foo = sink;
+      auto mod = cast<FModuleOp>(foo.getReferencedModule());
+      auto tpe =
+          problem.isRefType
+              ? RefType::get(cast<FIRRTLBaseType>(problem.source.getType()))
+              : problem.source.getType();
+      moduleModifications[mod].portsToAdd.push_back(
+          {{StringAttr::get(mod.getContext(), state.getNamespace(mod).newName(
+                                                  problem.newNameHint)),
+            tpe, Direction::In},
+           index});
+    }
+  }
+
+  // Iterate over modules from leaves to roots, adding ports and connections.
+  LLVM_DEBUG({ llvm::dbgs() << "Updating modules\n"; });
+  for (auto *op :
+       llvm::post_order(instancePathCache.instanceGraph.getTopLevelNode())) {
+    auto fmodule = cast<FModuleOp>(op->getModule());
+    if (!moduleModifications.count(fmodule))
+      continue;
+    auto modifications = moduleModifications[fmodule];
+    LLVM_DEBUG({
+      llvm::dbgs() << "  - module: " << fmodule.moduleName() << "\n";
+      llvm::dbgs() << "    ports:\n";
+      for (auto tuple : modifications.portsToAdd) {
+        auto port = std::get<0>(tuple);
+        auto index = std::get<1>(tuple);
+        llvm::dbgs() << "      - name: " << port.getName() << "\n"
+                     << "        id: " << index << "\n"
+                     << "        type: " << port.type << "\n"
+                     << "        direction: "
+                     << (port.direction == Direction::In ? "in" : "out")
+                     << "\n";
+      }
+    });
+    SmallVector<std::pair<unsigned, PortInfo>> newPorts;
+    SmallVector<unsigned> problemIndex;
+    for (auto tuple : modifications.portsToAdd) {
+      auto portInfo = std::get<0>(tuple);
+      auto index = std::get<1>(tuple);
+
+      // Create the port.
+      newPorts.push_back({fmodule.getNumPorts(), portInfo});
+      problemIndex.push_back(index);
+    }
+
+    auto builder = ImplicitLocOpBuilder::atBlockEnd(
+        UnknownLoc::get(fmodule.getContext()), fmodule.getBodyBlock());
+    auto originalNumPorts = fmodule.getNumPorts();
+    auto portIdx = fmodule.getNumPorts();
+    fmodule.insertPorts(newPorts);
+    for (auto tuple : llvm::zip(newPorts, problemIndex)) {
+      auto portPair = std::get<0>(tuple);
+      auto index = std::get<1>(tuple);
+      // Wire up the port.
+      Value src = moduleModifications[fmodule].connectionMap[index];
+      Value dest = fmodule.getArgument(portIdx++);
+      assert(src && "need to have an actual value");
+      if (portPair.second.direction == Direction::In)
+        std::swap(src, dest);
+      // Create RefSend/RefResolve if necessary.
+      if (dest.getType().isa<RefType>() && !src.getType().isa<RefType>()) {
+        src = builder.create<RefSendOp>(src);
+      } else if (!dest.getType().isa<RefType>() &&
+                 src.getType().isa<RefType>()) {
+        src = builder.create<RefResolveOp>(src);
+      }
+      builder.create<StrictConnectOp>(dest, src);
+    }
+
+    for (auto &uturn : moduleModifications[fmodule].uturns) {
+      Value src = std::get<0>(uturn);
+      int index = std::get<1>(uturn);
+      Value dest = moduleModifications[fmodule].connectionMap[index];
+      builder.create<StrictConnectOp>(src, dest);
+    }
+
+    for (auto *inst : instancePathCache.instanceGraph.lookup(fmodule)->uses()) {
+      InstanceOp useInst = cast<InstanceOp>(inst->getInstance());
+      auto enclosingModule = useInst->getParentOfType<FModuleOp>();
+      auto clonedInst = useInst.cloneAndInsertPorts(newPorts);
+      instancePathCache.replaceInstance(useInst, clonedInst);
+      // RAUW needs to have the same number of output results for the instance.
+      useInst->replaceAllUsesWith(
+          clonedInst.getResults().drop_back(newPorts.size()));
+      useInst->erase();
+      // Record information in the moduleModifications strucutre for the module
+      // _where this is instantiated_.  This is done so that when that module is
+      // visited later, there will be information available for it to find ports
+      // it needs to wire up.
+      for (auto &pair : llvm::enumerate(problemIndex)) {
+        if (moduleModifications[enclosingModule].connectionMap.count(
+                pair.value())) {
+          moduleModifications[enclosingModule].uturns.push_back(
+              {clonedInst.getResult(pair.index() + originalNumPorts),
+               pair.value()});
+        } else {
+          moduleModifications[enclosingModule].connectionMap[pair.value()] =
+            clonedInst.getResult(pair.index() + originalNumPorts);
+        }
+      }
+    }
   }
 
   // Update statistics

@@ -192,6 +192,37 @@ Optional<AnnoPathValue> resolvePath(StringRef rawPath, CircuitOp circuit,
 /// pass.
 bool isAnnoClassLowered(StringRef className);
 
+/// A representation of a deferred Wiring problem consisting of a source that
+/// should be connected to a sink.
+struct WiringProblem {
+
+  Value source;
+
+  Value sink;
+
+  StringRef newNameHint;
+
+  bool isRefType = true;
+};
+
+struct ModuleModifications {
+  using passUp = std::tuple<InstanceOp, int, int>;
+  using passDown = std::tuple<int, InstanceOp, int>;
+  using connect = std::tuple<InstanceOp, int, InstanceOp, int>;
+
+  SmallVector<std::variant<passUp, passDown, connect>> connections;
+
+  using instancePair = std::tuple<InstanceOp, int>;
+  using portInfoPair = std::tuple<PortInfo, int>;
+  using uturnPair = std::tuple<Value, int>;
+
+  SmallVector<portInfoPair> portsToAdd;
+
+  DenseMap<unsigned, Value> connectionMap;
+
+  SmallVector<uturnPair> uturns;
+};
+
 /// State threaded through functions for resolving and applying annotations.
 struct ApplyState {
   using AddToWorklistFn = llvm::function_ref<void(DictionaryAttr)>;
@@ -208,6 +239,7 @@ struct ApplyState {
   InstancePathCache &instancePathCache;
   DenseMap<Attribute, FlatSymbolRefAttr> instPathToNLAMap;
   size_t numReusedHierPaths = 0;
+  SmallVector<WiringProblem> wiringProblems;
 
   ModuleNamespace &getNamespace(FModuleLike module) {
     auto &ptr = namespaces[module];

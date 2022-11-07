@@ -1081,36 +1081,39 @@ static Optional<DictionaryAttr> parseAugmentedType(
     }
     auto companionTarget = resolvePath(companionAttr.getValue(), state.circuit,
                                        state.symTbl, state.targetCaches);
-    if (xmrSrcTarget->ref.getModule() !=
-        cast<FModuleOp>(companionTarget->ref.getOp())) {
+    auto companionMod = cast<FModuleOp>(companionTarget->ref.getOp());
+    if (xmrSrcTarget->ref.getModule() != companionMod) {
+
+      auto builder = ImplicitLocOpBuilder::atBlockEnd(
+          companionMod.getLoc(), companionMod.getBodyBlock());
+
+      auto name = state.getNamespace(companionMod)
+                      .newName(defName.getValue() + "_" +
+                               Twine(id.getValue().getZExtValue()));
+
+      auto sink = builder.create<WireOp>(
+          xmrSrcTarget->ref.getOp()->getResult(0).getType(), name);
+
+      state.wiringProblems.push_back(
+          {xmrSrcTarget->ref.getOp()->getResult(0), sink, name});
+
       // Get the name of the node op that reads the remote value from
-      // xmrSrcTarget. This adds the refsend, drills the ports and adds the ref
-      // resolve and then reads the output from resolve into a node. Note: The
-      // remote signal to which the XMR is being generated, does not contain any
-      // DontTouch. Which implies the remote signal can be optimized away, but
-      // the XMR should still point to a legal value or a constant after the
-      // optimization.
+      // xmrSrcTarget. This adds the refsend, drills the ports and adds the
+      // ref resolve and then reads the output from resolve into a node.
+      // Note: The remote signal to which the XMR is being generated, does
+      // not contain any DontTouch. Which implies the remote signal can be
+      // optimized away, but the XMR should still point to a legal value or
+      // a constant after the optimization.
       LLVM_DEBUG(llvm::dbgs() << "\n view from :" << targetAttr.getValue()
                               << " to \n " << companionAttr.getValue());
-      auto resolveTargetName = borePortsFromViewToCompanion(
-          *xmrSrcTarget, parentModule, state, *companionTarget, name);
-      if (!resolveTargetName) {
-        (mlir::emitError(loc, "Failed to resolve target, cannot find unique "
-                              "path from parent module `")
-         << parentModule.getName() << "` to target `" << targetAttr.getValue()
-         << "`")
-                .attachNote()
-            << "See the full Annotation here: " << root;
-        ;
-        return None;
-      }
+
       // Now the view target can be added to the local node created inside the
       // companion. Add the annotation. This essentially moves the annotation
       // from the remote XMR signal to a local wire, which in-turn reads the
       // XMR.
+      llvm::errs() << companion + ">" + sink.getName() << "\n";
       elementScattered.append(
-          "target", StringAttr::get(context, companion + ">" +
-                                                 resolveTargetName.getValue()));
+          "target", StringAttr::get(context, companion + ">" + sink.getName()));
     } else
       elementScattered.append("target", targetAttr);
 
